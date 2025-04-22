@@ -6,7 +6,7 @@ library(tidyquant)
 library(plotly)
 library(lubridate)
 library(reshape2)
-
+library(akima)
 
 # ===== Black-Scholes Call Option Formula =====
 bs_call <- function(S, K, T, r, sigma) {
@@ -180,7 +180,8 @@ ui <- fluidPage(
                  numericInput("min_strike_price_input_2", "Minimum Strike Price (% of Spot Price)", value = 80, min = 0, step = 0.01),
                  numericInput("max_strike_price_input_2", "Maximum Strike Price (% of Spot Price)", value = 120, min = 0, step = 0.01)
                ),
-               mainPanel(plotlyOutput("iv_surface"))
+               mainPanel(div(style = "transform: translate(15%, -15%);",
+                 plotlyOutput("iv_surface", width = "900px", height = "900px")))
              ))
   )
 )
@@ -188,7 +189,7 @@ ui <- fluidPage(
 # ===== Server =====
 server <- function(input, output, session) {
   market_data <- reactiveValues(all = list(), latest = NULL)
-  iv_data <- reactiveVal()
+
   # Shared slider state for syncing both tabs
   slider_state <- reactiveVal(list(
     min = Sys.Date() - years(1),
@@ -570,6 +571,77 @@ server <- function(input, output, session) {
       add_surface()
   })
   
+  iv_data_filtered <- reactive({
+    req(input$ticker_input_2)
+    
+    # Read in pre-saved options CSV (update path as needed)
+    options_data <- readr::read_csv("C:/Users/ngtru/OneDrive/Documents/College work/STA404/bulk_options_nasdaq.csv")
+    
+    df <- options_data %>%
+      filter(symbol == toupper(input$ticker_input_2)) %>%
+      filter(!is.na(impliedVolatility), 
+             impliedVolatility > 0.01, 
+             strike > 0,
+             !is.na(expirationDate))
+    
+    # Get spot price from quantmod
+    spot_price <- tryCatch({
+      quote <- getQuote(toupper(input$ticker_input_2))
+      as.numeric(quote$Last)
+    }, error = function(e) {
+      NA
+    })
+    
+    validate(
+      need(!is.na(spot_price), "Failed to fetch spot price for ticker.")
+    )
+    
+    df <- df %>%
+      mutate(
+        T = as.numeric(as.Date(expirationDate, format = "%m/%d/%Y") - Sys.Date()) / 365,
+        moneyness = strike / spot_price
+      ) %>%
+      filter(
+        strike >= spot_price * (input$min_strike_price_input_2 / 100),
+        strike <= spot_price * (input$max_strike_price_input_2 / 100)
+      )
+    
+    return(df)
+  })
+  
+  # 3D Implied Volatility Plot
+  output$iv_surface <- renderPlotly({
+    df <- iv_data_filtered()
+    req(nrow(df) > 0)
+    
+    # Axes
+    x_vals <- df$T
+    y_vals <- if (input$y_type_input == "Moneyness (Strike/Spot)") df$moneyness else df$strike
+    z_vals <- df$impliedVolatility * 100
+    
+    # 3D scatter plot of raw IV data
+    plot_ly(
+      x = ~x_vals,
+      y = ~y_vals,
+      z = ~z_vals,
+      type = "scatter3d",
+      mode = "markers",
+      marker = list(
+        size = 4,
+        color = ~z_vals,
+        colorscale = "Viridis",
+        showscale = TRUE
+      )
+    ) %>%
+      layout(
+        scene = list(
+          xaxis = list(title = "Time to Maturity (Years)"),
+          yaxis = list(title = input$y_type_input),
+          zaxis = list(title = "Implied Volatility (%)")
+        ),
+        margin = list(l = 0, r = 0, b = 0, t = 30)
+      )
+  })
 }
 
 # ===== Run App =====
